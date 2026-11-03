@@ -96,6 +96,11 @@ class ScanView(View):
                 self.controller.psbt_parser = None
                 return Destination(PSBTSelectSeedView, skip_current_view=True)
 
+            elif self.decoder.is_cashu_request:
+                from seedsigner.views.cashu_views import CashuSelectSeedView
+                return Destination(CashuSelectSeedView, skip_current_view=True,
+                                   view_args=dict(request=self.decoder.get_cashu_request_bytes()))
+
             elif self.decoder.is_settings:
                 from seedsigner.views.settings_views import SettingsIngestSettingsQRView
                 data = self.decoder.get_settings_data()
@@ -177,6 +182,16 @@ class ScanPSBTView(ScanView):
     @property
     def is_valid_qr_type(self):
         return self.decoder.is_psbt
+
+
+
+class ScanCashuRequestView(ScanView):
+    instructions_text = _mft("Scan Cashu request")
+    invalid_qr_type_message = _mft("Expected a Cashu request")
+
+    @property
+    def is_valid_qr_type(self):
+        return self.decoder.is_cashu_request
 
 
 

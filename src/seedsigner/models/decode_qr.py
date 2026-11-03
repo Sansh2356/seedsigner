@@ -300,14 +300,34 @@ class DecodeQR:
     @property
     def is_wallet_descriptor(self):
         check = self.qr_type in [QRType.WALLET__SPECTER, QRType.WALLET__UR, QRType.WALLET__CONFIGFILE, QRType.WALLET__GENERIC, QRType.OUTPUT__UR]
-        
+
         if self.qr_type in [QRType.BYTES__UR]:
             cbor = self.decoder.result_message().cbor
             raw = Bytes.from_cbor(cbor).data
-            data = raw.decode("utf-8").lower()
+            try:
+                data = raw.decode("utf-8").lower()
+            except UnicodeDecodeError:
+                return False  # binary payload (e.g. a Cashu request), not a setup file
             check = 'policy:' in data and "format:" in data and "derivation:" in data
-        
+
         return check
+
+
+    def get_cashu_request_bytes(self) -> bytes | None:
+        """The raw NutSigner v2 request, if this is a completed Cashu request QR."""
+        if not self.complete or self.qr_type != QRType.BYTES__UR:
+            return None
+        try:
+            raw = Bytes.from_cbor(self.decoder.result_message().cbor).data
+        except Exception:
+            return None
+        # "NS", version 2, type 1 (swap): see seedsigner.nutsigner.wire
+        return raw if raw[:4] == b"NS\x02\x01" else None
+
+
+    @property
+    def is_cashu_request(self) -> bool:
+        return self.get_cashu_request_bytes() is not None
 
     @property
     def is_settings(self):
