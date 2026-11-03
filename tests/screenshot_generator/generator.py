@@ -170,6 +170,44 @@ def generate_screenshots(locale):
     Renderer.get_instance = Mock(return_value=screenshot_renderer)
 
 
+    def cashu_screenshots() -> list[ScreenshotConfig]:
+        """NutSigner requests for seed_12 (storage.seeds[0]): one fully revealed, one not."""
+        from seedsigner.nutsigner import crypto, curve, wire
+        from seedsigner.nutsigner.device import DeviceSigner
+        from seedsigner.views import cashu_views
+        from seedsigner.views.view import ErrorView
+
+        pubkey = DeviceSigner.from_seed_bytes(seed_12.seed_bytes).pubkey_hex
+        kid = "01" + "ab" * 32
+
+        def request(reveal: bool) -> bytes:
+            secrets = [(a, "%064x" % (a * 7919)) for a in (1, 4, 16)] + \
+                      [(a, crypto.make_p2pk_secret(pubkey)) for a in (1, 2, 8, 32)]
+            outs = [{"amount": a, "id": kid, "B_": crypto.blind(s, 12345 + i)} for i, (a, s) in enumerate(secrets)]
+            return wire.encode_request({
+                "v": 1, "type": "swap", "mint": "https://testnut.cashu.space", "unit": "sat",
+                "inputs": [{"amount": 64, "id": kid, "secret": crypto.make_p2pk_secret(pubkey),
+                            "C": curve.serialize(curve.G).hex()}],
+                "outputs": outs,
+                "reveals": [{"index": i, "secret": s, "r": "%064x" % (12345 + i)}
+                            for i, (a, s) in enumerate(secrets)] if reveal else [],
+            })
+
+        good, hidden = request(True), request(False)
+        return [
+            # CashuPubkeyView and CashuSignatureQRView use QRDisplayScreen, which renders
+            # from a thread the generator can't capture (same as PSBTSignedQRDisplayView).
+            ScreenshotConfig(cashu_views.CashuMenuView),
+            ScreenshotConfig(cashu_views.CashuSelectSeedView, dict(request=good)),
+            ScreenshotConfig(cashu_views.CashuReviewView, dict(seed_num=0, request=good, page=0), screenshot_name="CashuReviewView_send"),
+            ScreenshotConfig(cashu_views.CashuReviewView, dict(seed_num=0, request=good, page=1), screenshot_name="CashuReviewView_details_approve"),
+            ScreenshotConfig(cashu_views.CashuReviewView, dict(seed_num=0, request=hidden, page=2), screenshot_name="CashuReviewView_unverified_warning"),
+            ScreenshotConfig(ErrorView, dict(title="Cashu", status_headline="Request rejected",
+                                             text="reveal for output 0 does not match its B_ (host is lying)",
+                                             button_text="OK"), screenshot_name="CashuRejected"),
+        ]
+
+
     def setup_screenshots(locale: str) -> dict[str, list[ScreenshotConfig]]:
         """ Set up some test data that we'll need in the `Controller` for certain Views """
         # Must reset the Controller so each locale gets a fresh start
@@ -488,6 +526,7 @@ def generate_screenshots(locale):
                 ScreenshotConfig(tools_views.ToolsAddressExplorerAddressListView),
                 # ScreenshotConfig(tools_views.ToolsAddressExplorerAddressView),
             ],
+            "Cashu Views": cashu_screenshots(),
             "Settings Views": settings_views_list + [
                 ScreenshotConfig(settings_views.IOTestView),
                 ScreenshotConfig(settings_views.DonateView),
