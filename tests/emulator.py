@@ -112,12 +112,21 @@ class ScriptedButtons:
         self.override_ind = False
         self.last_input_time = int(time.time() * 1000)
 
-    def wait_for(self, keys=[]) -> int:
-        # A press is (key, label) or (key, label, seconds to look at the screen first)
-        step = self.presses[0] if self.presses else None
-        time.sleep(step[2] if step and len(step) > 2 else self.settle_s)  # let rendering threads draw
+    def _shot(self):
         with self.display.lock:
-            shot = self.display.last.copy() if self.display.last else None
+            return self.display.last.copy() if self.display.last else None
+
+    def wait_for(self, keys=[]) -> int:
+        # A press is (key, label), or (key, label, ready) where ready(screen) -> bool
+        # says when the screen is worth capturing (polled for up to 20 s).
+        step = self.presses[0] if self.presses else None
+        time.sleep(self.settle_s)  # let rendering threads draw
+        shot = self._shot()
+        if step and len(step) > 2:
+            deadline = time.time() + 20
+            while not (shot is not None and step[2](shot)) and time.time() < deadline:
+                time.sleep(0.5)
+                shot = self._shot()
         if not self.presses:
             self.screens.append(("end", shot))
             raise StopFlowBasedTest()
@@ -190,7 +199,8 @@ SCRIPTS = {
         (K.KEY_PRESS, "select signer: first seed"),
         (K.KEY_PRESS, "review 1/2: Next"),
         (K.KEY_PRESS, "review 2/2: Approve"),
-        (K.KEY_PRESS, "signature QR: done", 2.0),  # the brightness tip covers the QR for 1.2 s
+        # wait until the QR is readable: the brightness tip covers it at first
+        (K.KEY_PRESS, "signature QR: done", lambda screen: read_qr_text(screen) is not None),
     ],
     # The device refuses the request before review and shows why
     "reject": [
