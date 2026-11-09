@@ -30,11 +30,14 @@ for name in ("RPi", "RPi.GPIO", "spidev", "seedsigner.hardware.microsd",
              "seedsigner.hardware.displays.st7789_mpy", "seedsigner.hardware.displays.ili9341"):
     sys.modules[name] = MagicMock()
 
-_picamera = ModuleType("picamera")
-class PiCameraError(Exception):
-    pass
-_picamera.PiCameraError = PiCameraError
-sys.modules["picamera"] = _picamera
+REAL_CAMERA = "--real-camera" in sys.argv  # on a Pi: scan with the real camera, emulate only screen + buttons
+
+if not REAL_CAMERA:
+    _picamera = ModuleType("picamera")
+    class PiCameraError(Exception):
+        pass
+    _picamera.PiCameraError = PiCameraError
+    sys.modules["picamera"] = _picamera
 
 
 class FakeVideoStream:
@@ -62,9 +65,10 @@ class FakeVideoStream:
         pass
 
 
-_pivideostream = ModuleType("seedsigner.hardware.pivideostream")
-_pivideostream.PiVideoStream = FakeVideoStream
-sys.modules["seedsigner.hardware.pivideostream"] = _pivideostream
+if not REAL_CAMERA:
+    _pivideostream = ModuleType("seedsigner.hardware.pivideostream")
+    _pivideostream.PiVideoStream = FakeVideoStream
+    sys.modules["seedsigner.hardware.pivideostream"] = _pivideostream
 
 
 from seedsigner.controller import Controller, StopFlowBasedTest                     # noqa: E402
@@ -229,15 +233,19 @@ if __name__ == "__main__":
     from PIL import Image
 
     ap = argparse.ArgumentParser(description="Scan request QR images in the emulator and act on the Cashu request")
-    ap.add_argument("images", nargs="+", help="photos or saved images of the request QR frames, in order")
+    ap.add_argument("images", nargs="*", help="photos or saved images of the request QR frames, in order")
+    ap.add_argument("--real-camera", action="store_true", help="scan with the Pi camera instead of images")
+    ap.add_argument("--timeout", type=float, default=120, help="seconds before giving up")
     ap.add_argument("--seed-words", required=True, help="seed to load into memory before starting")
     ap.add_argument("--script", choices=sorted(SCRIPTS), default="approve")
     ap.add_argument("--fps", type=float, default=5.0, help="how fast the images cycle, like the host's animation")
     ap.add_argument("--out", default="emulator-screens", help="where to save every captured screen")
     args = ap.parse_args()
+    if not args.images and not args.real_camera:
+        ap.error("give request QR images, or --real-camera")
 
     screens = Emulator([Image.open(p) for p in args.images], SCRIPTS[args.script],
-                       seed_mnemonics=[args.seed_words], fps=args.fps).run()
+                       seed_mnemonics=[args.seed_words], fps=args.fps).run(args.timeout)
     os.makedirs(args.out, exist_ok=True)
     for i, (label, img) in enumerate(screens):
         if img is not None:
