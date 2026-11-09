@@ -13,6 +13,16 @@ class CameraConnectionError(Exception):
 
 
 
+def _camera_errors():
+    """What the camera library raises when the camera is missing or its cable is loose."""
+    try:
+        from picamera import PiCameraError
+        return (PiCameraError,)
+    except ImportError:  # picamera2 (Bookworm) raises these when no camera is found
+        return (RuntimeError, IndexError)
+
+
+
 class Camera(Singleton):
     _video_stream = None
     _picamera = None
@@ -28,7 +38,6 @@ class Camera(Singleton):
 
 
     def start_video_stream_mode(self, resolution=(512, 384), framerate=12, format="bgr"):
-        from picamera import PiCameraError
         from seedsigner.hardware.pivideostream import PiVideoStream
         if self._video_stream is not None:
             self.stop_video_stream_mode()
@@ -36,7 +45,7 @@ class Camera(Singleton):
         try:
             self._video_stream = PiVideoStream(resolution=resolution,framerate=framerate, format=format)
             self._video_stream.start()
-        except PiCameraError:
+        except _camera_errors():
             # This error most often occurs because the camera connection is loose
             raise CameraConnectionError()
 
@@ -60,16 +69,20 @@ class Camera(Singleton):
 
 
     def start_single_frame_mode(self, resolution=(720, 480)):
-        from picamera import PiCamera, PiCameraError
         if self._video_stream is not None:
             self.stop_video_stream_mode()
         if self._picamera is not None:
             self._picamera.close()
 
         try:
-            self._picamera = PiCamera(resolution=resolution, framerate=24)
-            self._picamera.start_preview()
-        except PiCameraError:
+            try:
+                from picamera import PiCamera
+                self._picamera = PiCamera(resolution=resolution, framerate=24)
+                self._picamera.start_preview()
+            except ImportError:
+                from seedsigner.hardware.pivideostream import Picamera2Still
+                self._picamera = Picamera2Still(resolution)
+        except _camera_errors():
             # This error most often occurs because the camera connection is loose
             raise CameraConnectionError()
 
@@ -77,6 +90,9 @@ class Camera(Singleton):
     def capture_frame(self):
         if self._picamera is None:
             raise Exception("Must call start_single_frame_mode first.")
+
+        if hasattr(self._picamera, "capture_pil"):  # picamera2: auto exposure already settled during start
+            return self._picamera.capture_pil().rotate(90 + self._camera_rotation)
 
         # Set auto-exposure values
         self._picamera.shutter_speed = self._picamera.exposure_speed
