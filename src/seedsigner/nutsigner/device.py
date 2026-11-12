@@ -3,7 +3,7 @@
 This module is what runs on the Pi. It never talks to a mint and never sees
 the network. It receives a request from the (untrusted) host, checks it, shows
 the user what will happen, and returns one Schnorr signature over the whole
-swap (NUT-11 SIG_ALL).
+swap or melt (NUT-11 SIG_ALL).
 
 Request format (v1), sent by the host:
 
@@ -20,11 +20,18 @@ Request format (v1), sent by the host:
 A "reveal" lets the device prove what an output really is: it recomputes
 B_ = hash_to_curve(secret) + r*G and checks it matches. Outputs without a
 reveal are shown as UNVERIFIED, because the device cannot tell who owns them.
+
+A melt (pay a Lightning invoice, NUT-05) has "type": "melt" and also
+  "invoice": "lnbc..", "quote": "<mint quote id>", "amount": 21, "fee_reserve": 2
+Its outputs are NUT-08 blank outputs (amount 0) for the unused fee reserve,
+and every one of them must be revealed as change back to this device.
+The device can't tell which invoice the quote id pays (see _review_melt), so
+for a melt it treats every input as at risk.
 """
 
 from embit import bip32, bip39, ec
 
-from . import crypto, curve
+from . import bolt11, crypto, curve
 
 # Project-specific derivation path for the P2PK signing key. 129372 is the
 # Cashu coin type used by NUT-13; the 11' branch (for NUT-11) keeps this key
@@ -75,12 +82,13 @@ class DeviceSigner:
             raise Rejected("request is not a JSON object")
         if req.get("v") != 1:
             raise Rejected("unsupported request version")
-        if req.get("type") != "swap":
-            raise Rejected("only swap requests are supported in v1")
+        melt = req.get("type") == "melt"
+        if not melt and req.get("type") != "swap":
+            raise Rejected("only swap and melt requests are supported")
 
         inputs = req.get("inputs") or []
         outputs = req.get("outputs") or []
-        if not inputs or not outputs:
+        if not inputs or not (outputs or melt):  # a melt paying exactly has no outputs
             raise Rejected("request needs at least one input and one output")
 
         # --- inputs: all must be ours, all must carry identical SIG_ALL conditions
@@ -103,13 +111,17 @@ class DeviceSigner:
                 first_tags = tags
             elif tags != first_tags:
                 raise Rejected("inputs have different spending conditions")
-            in_total += _positive_amount(p, f"input {i}")
+            in_total += _amount(p.get("amount"), f"input {i}")
             _check_point(p.get("C"), f"input {i} C")
 
-        # --- outputs: well-formed
+        # --- outputs: well-formed (a melt's blank outputs carry no amount)
         out_total = 0
         for j, o in enumerate(outputs):
-            out_total += _positive_amount(o, f"output {j}")
+            if melt:
+                if type(o.get("amount")) is not int or o["amount"] != 0:  # NUT-08
+                    raise Rejected(f"output {j} of a melt must be a blank output (amount 0)")
+            else:
+                out_total += _amount(o.get("amount"), f"output {j}")
             _check_point(o.get("B_"), f"output {j} B_")
 
         fee = in_total - out_total
@@ -153,6 +165,9 @@ class DeviceSigner:
             else:
                 kinds[j] = "bearer"
 
+        if melt:
+            return self._review_melt(req, in_total, kinds)
+
         change = sum(o["amount"] for o, k in zip(outputs, kinds) if k == "change")
         leaving = out_total - change
         if self.max_send is not None and leaving > self.max_send:
@@ -178,12 +193,61 @@ class DeviceSigner:
             "unverified": sum(1 for k in kinds if k == "unverified"),
         }
 
+    def _review_melt(self, req, in_total, kinds):
+        if set(kinds) - {"change"}:
+            raise Rejected("a melt may only return change to this device")
+        if req.get("unit") != "sat":
+            raise Rejected("melt is only supported in sat")
+        quote = req.get("quote")
+        if not isinstance(quote, str) or not quote:
+            raise Rejected("melt has no quote id")
+        amount = _amount(req.get("amount"), "melt")
+        fee_reserve = _amount(req.get("fee_reserve"), "fee reserve", 0)
+        # The device reads the invoice itself instead of trusting the host's amount.
+        try:
+            inv_amount, payment_hash, network = bolt11.decode(req.get("invoice"))
+        except ValueError as e:
+            raise Rejected(f"invoice is not valid ({e})") from None
+        if network != "bc":
+            raise Rejected("only mainnet (lnbc) invoices are supported")
+        if inv_amount is None:
+            raise Rejected("invoices without an amount are not supported")
+        if inv_amount != amount:
+            raise Rejected(f"invoice is for {inv_amount} sat but the quote says {amount}")
+        # Limitation: offline, the device cannot check that the quote id belongs
+        # to this invoice, or that fee_reserve is the mint's; only the mint
+        # knows, and it pays the invoice it stored with the quote. A lying host
+        # can swap in the quote of any invoice the inputs cover, so up to
+        # in_total can go to a payee the user never saw. That is the bound the
+        # screen shows and max_send applies to. The signature covers the quote
+        # id, so it can't be reused for another quote.
+        if in_total < amount + fee_reserve:
+            raise Rejected("inputs do not cover the amount and the fee reserve")
+        # Enough blank outputs to return everything not paid to the invoice;
+        # with fewer, the mint would keep the overpaid rest.
+        if len(req["outputs"]) < (in_total - amount).bit_length():
+            raise Rejected("too few change outputs for the overpaid amount")
+        if self.max_send is not None and in_total > self.max_send:
+            raise Rejected(f"risking {in_total} exceeds this device's limit of {self.max_send}")
+        return {
+            "type": "melt",
+            "mint": req.get("mint", "?"),
+            "unit": "sat",
+            "in_total": in_total,
+            "sending": amount,
+            "fee_reserve": fee_reserve,
+            "at_risk": in_total,  # worst case; normally all but amount + fees comes back
+            "payment_hash": payment_hash,
+            "quote": quote,
+        }
+
     # ------------------------------------------------------------ sign
 
     def sign(self, req: dict) -> dict:
         """Review again (never trust an earlier review) and sign SIG_ALL."""
         self.review(req)
-        msg = crypto.sig_all_message(req["inputs"], req["outputs"])
+        msg = crypto.sig_all_message(req["inputs"], req["outputs"],
+                                     req["quote"] if req["type"] == "melt" else None)
         sig = crypto.schnorr_sign(self.privkey, msg)
         if not crypto.schnorr_verify(self.pubkey_hex, msg, sig):
             raise Rejected("self-check of signature failed")
@@ -199,6 +263,14 @@ def summary_lines(review: dict) -> list:
     """Short lines that fit a small screen (about 20 characters each)."""
     u = review["unit"]
     mint = review["mint"].replace("https://", "").replace("http://", "")
+    if review.get("type") == "melt":
+        return [f"Pay {review['sending']} {u} (Lightning)",
+                "Payee not verified",
+                f"Max fee {review['fee_reserve']} {u}",
+                f"Up to {review['at_risk']} {u} at risk",
+                f"Mint {mint[:16]}"]
+    if review["sending"] == 0:  # every output is change: e.g. receiving coins locked to us
+        return [f"Receive {review['in_total']} {u}", f"Fee {review['fee']} {u}", f"Mint {mint[:16]}"]
     lines = [f"Send {review['sending']} {u}"]
     for rcp in review["recipients"]:
         if rcp["kind"] == "locked":
@@ -223,9 +295,8 @@ def _valid_tags(tags) -> bool:
         isinstance(t, list) and t and all(isinstance(x, str) for x in t) for t in tags)
 
 
-def _positive_amount(obj, what) -> int:
-    a = obj.get("amount")
-    if not isinstance(a, int) or isinstance(a, bool) or a <= 0:
+def _amount(a, what, minimum=1) -> int:
+    if not isinstance(a, int) or isinstance(a, bool) or a < minimum:
         raise Rejected(f"{what} has an invalid amount")
     return a
 
