@@ -19,7 +19,7 @@ import tempfile
 from PIL import Image, ImageFilter
 from urtypes.bytes import Bytes
 
-from cashu_helpers import MNEMONIC, make_request, read_ur_bytes
+from cashu_helpers import MNEMONIC, make_melt_request, make_receive_request, make_request, read_ur_bytes
 from seedsigner.helpers.qr import QR
 from seedsigner.helpers.ur2.ur import UR
 from seedsigner.helpers.ur2.ur_encoder import UREncoder
@@ -78,4 +78,36 @@ def test_lying_request_is_rejected_on_screen():
     # Had the device not rejected it, the screen after "select signer" would be a
     # review page whose buttons don't match the script, and the run would fail.
     assert result["screens"] == ["main menu: Scan", "select signer: first seed", "rejected: OK", "end"]
+    assert result["errors"] == ["reveal for output 0 does not match its B_ (host is lying)"]
+    assert result["signature_qr"] is None
+
+
+def test_melt_approve_and_read_signature_off_screen():
+    pubkey = DeviceSigner.from_mnemonic(MNEMONIC).pubkey_hex
+    request = make_melt_request(pubkey)
+    result = run_emulator(request, "approve")
+    assert result["screens"] == ["main menu: Scan", "select signer: first seed", "review 1/2: Next",
+                                 "review 2/2: Approve", "signature QR: done", "end"]
+    sig = wire.decode_signature(read_ur_bytes(result["signature_qr"]))
+    req = wire.decode_request(request)
+    msg = crypto.sig_all_message(req["inputs"], req["outputs"], req["quote"])
+    assert crypto.schnorr_verify(pubkey, msg, sig["signature"])
+
+
+def test_receive_approve_and_read_signature_off_screen():
+    pubkey = DeviceSigner.from_mnemonic(MNEMONIC).pubkey_hex
+    request = make_receive_request(pubkey)
+    result = run_emulator(request, "approve-1page")
+    assert result["screens"] == ["main menu: Scan", "select signer: first seed", "review 1/1: Approve",
+                                 "signature QR: done", "end"]
+    sig = wire.decode_signature(read_ur_bytes(result["signature_qr"]))
+    req = wire.decode_request(request)
+    assert crypto.schnorr_verify(pubkey, crypto.sig_all_message(req["inputs"], req["outputs"]), sig["signature"])
+
+
+def test_tampered_melt_is_rejected_on_screen():
+    pubkey = DeviceSigner.from_mnemonic(MNEMONIC).pubkey_hex
+    result = run_emulator(make_melt_request(pubkey, tamper=True), "reject")
+    assert result["screens"] == ["main menu: Scan", "select signer: first seed", "rejected: OK", "end"]
+    assert result["errors"] == ["invoice is for 10 sat but the quote says 9"]
     assert result["signature_qr"] is None

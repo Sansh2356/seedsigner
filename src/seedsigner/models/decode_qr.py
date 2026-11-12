@@ -321,8 +321,8 @@ class DecodeQR:
             raw = Bytes.from_cbor(self.decoder.result_message().cbor).data
         except Exception:
             return None
-        # "NS", version 2, type 1 (swap): see seedsigner.nutsigner.wire
-        return raw if raw[:4] == b"NS\x02\x01" else None
+        # "NS", version 2, type 1 (swap) or 2 (melt): see seedsigner.nutsigner.wire
+        return raw if raw[:4] in (b"NS\x02\x01", b"NS\x02\x02") else None
 
 
     @property

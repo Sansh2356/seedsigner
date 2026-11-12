@@ -1,4 +1,4 @@
-"""Cashu (NutSigner) flow: show the P2PK pubkey, review and sign swap requests.
+"""Cashu (NutSigner) flow: show the P2PK pubkey, review and sign swap, receive and melt requests.
 
 The host wallet sends a NutSigner v2 request as an animated `ur:bytes` QR. The
 device checks it with seedsigner.nutsigner (the same code as the NutSigner
@@ -36,14 +36,24 @@ def _rejected(reason: str, **kw) -> Destination:
     ), **kw)
 
 
-def _review_pages(lines: list[str]) -> list[list[str]]:
-    """Group summary_lines(): the send line with its recipients, then the
-    change/fee/mint details, then each warning on its own page."""
+def _review_pages(review: dict) -> tuple[list[list[str]], int]:
+    """summary_lines() as pages ([headline, *text]) and the index of the first warning page.
+
+    Swap: the send line with its recipients, then change/fee/mint, then each
+    warning. Receive (all change): one page. Melt: payment, max fee and mint,
+    then the amount at risk and the unverified payee as a warning."""
+    from seedsigner.nutsigner.device import summary_lines
+    lines = summary_lines(review)
+    if review.get("type") == "melt":
+        pay, payee, fee, risk, mint = lines
+        return [[pay, fee, mint], [risk, payee]], 1
+    if review["sending"] == 0:
+        return [lines], 1
     send = [lines[0]] + [l.strip() for l in lines[1:] if l.startswith(" ")]
     rest = [l for l in lines[1:] if not l.startswith(" ")]
     details = [l for l in rest if not l.startswith("!")]
     warnings = [[l.lstrip("! ")] for l in rest if l.startswith("!")]
-    return [send, details] + warnings
+    return [send, details] + warnings, 2
 
 
 
@@ -127,7 +137,7 @@ class CashuReviewView(View):
 
     def __init__(self, seed_num: int, request: bytes, page: int = 0):
         from seedsigner.nutsigner import wire
-        from seedsigner.nutsigner.device import Rejected, summary_lines
+        from seedsigner.nutsigner.device import Rejected
         super().__init__()
         self.seed_num, self.request, self.page = seed_num, request, page
         try:
@@ -135,13 +145,13 @@ class CashuReviewView(View):
         except (Rejected, wire.WireError) as e:
             self.set_redirect(_rejected(str(e), skip_current_view=True))
             return
-        self.pages = _review_pages(summary_lines(review))
-        self.unverified = review["unverified"]
+        self.pages, self.first_warning = _review_pages(review)
+        self.unverified = review.get("unverified", 0)  # melts have none: every output must be change
 
     def run(self):
         lines = self.pages[self.page]
         is_last = self.page == len(self.pages) - 1
-        is_warning = self.page >= 2
+        is_warning = self.page >= self.first_warning
         button_data = [self.APPROVE, self.REJECT] if is_last else [self.NEXT]
         text = "\n".join(lines[1:])
         if is_warning and self.unverified:

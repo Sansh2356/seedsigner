@@ -206,6 +206,13 @@ SCRIPTS = {
         # wait until the QR is readable: the brightness tip covers it at first
         (K.KEY_PRESS, "signature QR: done", lambda screen: read_qr_text(screen) is not None),
     ],
+    # The same for a one-page review (a receive)
+    "approve-1page": [
+        (K.KEY_PRESS, "main menu: Scan"),
+        (K.KEY_PRESS, "select signer: first seed"),
+        (K.KEY_PRESS, "review 1/1: Approve"),
+        (K.KEY_PRESS, "signature QR: done", lambda screen: read_qr_text(screen) is not None),
+    ],
     # The device refuses the request before review and shows why
     "reject": [
         (K.KEY_PRESS, "main menu: Scan"),
@@ -244,6 +251,10 @@ if __name__ == "__main__":
     if not args.images and not args.real_camera:
         ap.error("give request QR images, or --real-camera")
 
+    from seedsigner.views.view import ErrorView
+    errors, _error_run = [], ErrorView.run
+    ErrorView.run = lambda self: errors.append(self.text) or _error_run(self)  # record why
+
     screens = Emulator([Image.open(p) for p in args.images], SCRIPTS[args.script],
                        seed_mnemonics=[args.seed_words], fps=args.fps).run(args.timeout)
     os.makedirs(args.out, exist_ok=True)
@@ -256,5 +267,6 @@ if __name__ == "__main__":
     print(json.dumps({
         "screens": [label for label, _ in screens],
         "signature_qr": read_qr_text(sig_screen) if sig_screen is not None else None,
+        "errors": errors,
         "saved_to": os.path.abspath(args.out),
     }))
