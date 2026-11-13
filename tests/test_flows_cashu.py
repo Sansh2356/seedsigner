@@ -64,7 +64,7 @@ class TestCashuFlows(FlowTest):
                          ["Up to 16 sat at risk", "Payee not verified"]]
         assert first_warning == 1  # the at-risk page is a warning, and carries Approve / Reject
         pages, _ = cashu_views._review_pages(dev.review(wire.decode_request(make_receive_request(self.pubkey))))
-        assert pages == [["Receive 21 sat", "Fee 1 sat", "Mint testnut.cashu.sp"]]
+        assert pages == [["Receive 20 sat", "Fee 1 sat", "Mint testnut.cashu.sp"]]  # the amount kept
 
 
     def approve(self, request: bytes, pages: int) -> dict:
